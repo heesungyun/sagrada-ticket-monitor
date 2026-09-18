@@ -1,0 +1,62 @@
+name: Sagrada Familia ticket monitor
+
+on:
+  schedule:
+    # Recovery only. The cadence comes from run-to-run chaining, because
+    # GitHub's scheduler was measured delivering ~8 runs/day against a cron
+    # asking for 84. This entry exists to restart a chain that has broken.
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      test_dates:
+        description: "Rehearsal only. Comma-separated dates to check INSTEAD of the configured ones."
+        required: false
+        default: ""
+      chained:
+        description: "Set by the monitor when it starts its own successor. Leave empty."
+        required: false
+        default: ""
+      poll_minutes:
+        description: "Rehearsal only. Shorten the watch so a test run finishes quickly."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  # Lets a run start its successor, and switch the schedule off after the window.
+  actions: write
+
+concurrency:
+  group: sagrada-ticket-monitor
+  # Must stay false. A chained successor starting while its predecessor is still
+  # finishing would otherwise cancel it, and a cancelled run sends no failure
+  # mail - which is the delivery path for a find.
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Must exceed POLL_MINUTES.
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check ticket availability
+        run: node monitor.mjs
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+          # Dates and their notes are configuration, not source: this repository
+          # is public and the owner's travel plans are not part of the program.
+          MONITOR_DATES: ${{ inputs.test_dates != '' && inputs.test_dates || secrets.MONITOR_DATES }}
+          DATE_NOTES_JSON: ${{ secrets.DATE_NOTES_JSON }}
+          CHAINED_RUN: ${{ inputs.chained }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POLL_MINUTES: ${{ inputs.poll_minutes != '' && inputs.poll_minutes || '50' }}
+          POLL_INTERVAL_SECONDS: "300"
+          # ntfy free tier allows only 5 emails a day, so repeat mail about a
+          # still-open date is capped rather than allowed to starve a real find.
+          ALERT_COOLDOWN_HOURS: "6"
+          SEND_TEST_ON_MANUAL: "true"

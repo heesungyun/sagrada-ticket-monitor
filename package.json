@@ -1,0 +1,10 @@
+{
+  "name": "sagrada-ticket-monitor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test.mjs",
+    "check": "node monitor.mjs"
+  },
+  "description": "Watches the official Sagrada Familia booking backend for released tickets."
+}
