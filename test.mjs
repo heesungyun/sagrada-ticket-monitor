@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { barcelonaToday, combineAlerts, evaluateResults } from "./monitor.mjs";
+import { barcelonaToday, combineAlerts, evaluateResults, markPersistent } from "./monitor.mjs";
 
 const products = [
   { id: 4375, name: "basic" },
@@ -224,6 +224,94 @@ function finding(product, overrides = {}) {
 
   const clean = combineAlerts(evaluateResults([findings[0]]));
   assert.equal(clean.priority, 5);
+}
+
+// 13. markPersistent: an opening that stays open picks up the "persistent" caution
+//    exactly when it has been open for the threshold, and not before.
+const MINUTE = 60_000;
+const T0 = 1_700_000_000_000;
+const openOn = (...dates) => evaluateResults([finding(tower, { openAt4: dates, openAt2: dates })]);
+{
+  const firstSeen = new Map();
+  assert.deepEqual(markPersistent(openOn(DATE_A), firstSeen, T0, 15)[0].cautions, []);
+  assert.deepEqual(markPersistent(openOn(DATE_A), firstSeen, T0 + 14 * MINUTE, 15)[0].cautions, []);
+  assert.deepEqual(
+    markPersistent(openOn(DATE_A), firstSeen, T0 + 15 * MINUTE, 15)[0].cautions,
+    ["persistent"],
+  );
+  // Fresh alerts every sweep, so the caution is not carried over; it is recomputed.
+  assert.deepEqual(
+    markPersistent(openOn(DATE_A), firstSeen, T0 + 20 * MINUTE, 15)[0].cautions,
+    ["persistent"],
+  );
+}
+
+// 14. markPersistent: dates are tracked independently, and a date that disappears
+//     for even one sweep loses its history, so a reopening starts a fresh clock.
+{
+  const firstSeen = new Map();
+  markPersistent(openOn(DATE_A), firstSeen, T0, 15);
+  const [a, b] = markPersistent(openOn(DATE_A, DATE_B), firstSeen, T0 + 10 * MINUTE, 15);
+  assert.deepEqual(a.cautions, []);
+  assert.deepEqual(b.cautions, []);
+  // DATE_A is now 20 minutes old, DATE_B only 10.
+  const [a2, b2] = markPersistent(openOn(DATE_A, DATE_B), firstSeen, T0 + 20 * MINUTE, 15);
+  assert.deepEqual(a2.cautions, ["persistent"]);
+  assert.deepEqual(b2.cautions, []);
+
+  // Closed for one (empty) sweep, then back: the clock restarts.
+  assert.deepEqual(markPersistent([], firstSeen, T0 + 21 * MINUTE, 15), []);
+  assert.equal(firstSeen.size, 0);
+  assert.deepEqual(markPersistent(openOn(DATE_A), firstSeen, T0 + 22 * MINUTE, 15)[0].cautions, []);
+  assert.deepEqual(markPersistent(openOn(DATE_A), firstSeen, T0 + 36 * MINUTE, 15)[0].cautions, []);
+  assert.deepEqual(
+    markPersistent(openOn(DATE_A), firstSeen, T0 + 37 * MINUTE, 15)[0].cautions,
+    ["persistent"],
+  );
+}
+
+// 15. markPersistent: an opening that changes kind on the same date is still the
+//     same opening, and marking never alters the fingerprint (no re-sent alerts).
+{
+  const firstSeen = new Map();
+  const small = evaluateResults([finding(guided, { openAt2: [DATE_A] })]);
+  assert.equal(small[0].kind, "small-party");
+  markPersistent(small, firstSeen, T0, 15);
+
+  const four = evaluateResults([finding(tower, { openAt4: [DATE_A], openAt2: [DATE_A] })]);
+  assert.equal(four[0].kind, "four");
+  const before = four[0].fingerprint;
+  markPersistent(four, firstSeen, T0 + 15 * MINUTE, 15);
+  assert.deepEqual(four[0].cautions, ["persistent"]);
+  assert.equal(four[0].fingerprint, before);
+  assert.equal(four[0].fingerprint, `four:${DATE_A}:4443`);
+
+  // Marking the same alert twice must not stack the caution.
+  markPersistent(four, firstSeen, T0 + 16 * MINUTE, 15);
+  assert.deepEqual(four[0].cautions, ["persistent"]);
+}
+
+// 16. combineAlerts: when every alert is cautioned the mail is labelled and drops
+//     to priority 3; a clean alert is ranked ahead of a cautioned one even when
+//     the cautioned one is the better kind and the earlier date.
+{
+  const cautioned = (alert) => ({ ...alert, cautions: ["persistent"] });
+
+  const all = combineAlerts([cautioned(openOn(DATE_A)[0])]);
+  assert.equal(all.priority, 3);
+  assert.ok(all.title.startsWith("Likely closed slot: "));
+
+  const clean = evaluateResults([finding(guided, { openAt2: [DATE_B] })])[0];
+  const stale = cautioned(openOn(DATE_A)[0]);
+  assert.equal(stale.kind, "four");
+  assert.equal(clean.kind, "small-party");
+
+  const mixed = combineAlerts([stale, clean]);
+  assert.ok(!mixed.title.startsWith("Likely closed slot: "));
+  assert.ok(mixed.title.includes(DATE_B));
+  assert.ok(mixed.title.endsWith("(+1 more)"));
+  assert.equal(mixed.priority, 4);
+  assert.ok(mixed.message.startsWith(`=== ${DATE_B} ===`));
 }
 
 console.log("All local logic tests passed.");

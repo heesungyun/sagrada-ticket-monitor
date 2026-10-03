@@ -102,6 +102,7 @@ GitHub 스케줄러는 잦은 cron을 대폭 솎아냅니다. 20분 간격(하�
 |---|---|---|
 | `POLL_MINUTES` | 50 | 한 실행이 감시하는 시간. `timeout-minutes`보다 작아야 함 |
 | `POLL_INTERVAL_SECONDS` | 90 | 확인 간격 |
+| `PERSISTENT_MINUTES` | 15 | 이 시간 이상 계속 열려 있으면 '닫힌 시간대일 가능성'으로 낮춰서 알림 |
 | `CHAIN_RUNS` | (켜짐) | `false`면 다음 실행을 띄우지 않음 |
 | `ALERT_COOLDOWN_HOURS` | 6 | 같은 알림 억제 시간 |
 
