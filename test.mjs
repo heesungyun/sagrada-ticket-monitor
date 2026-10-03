@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { evaluateResults } from "./monitor.mjs";
+import { barcelonaToday, combineAlerts, evaluateResults } from "./monitor.mjs";
 
 const products = [
   { id: 4375, name: "basic" },
@@ -147,6 +147,83 @@ function finding(product, overrides = {}) {
     alertsAgain.map((a) => a.fingerprint).sort(),
     alerts.map((a) => a.fingerprint).sort(),
   );
+}
+
+// 9. An alert on `today` is cautioned; other dates are not. Passing no options
+//    leaves every alert clean, as before the caution existed.
+{
+  const findings = [
+    finding(tower, { openAt4: [DATE_A], openAt2: [DATE_A] }),
+    finding(guided, { openAt4: [], openAt2: [DATE_B] }),
+  ];
+  const alerts = evaluateResults(findings, { today: DATE_A });
+  assert.deepEqual(alerts.find((a) => a.date === DATE_A).cautions, ["today"]);
+  assert.deepEqual(alerts.find((a) => a.date === DATE_B).cautions, []);
+
+  for (const unmarked of [evaluateResults(findings), evaluateResults(findings, {})]) {
+    assert.deepEqual(unmarked.map((a) => a.cautions), [[], []]);
+  }
+
+  // A `today` that matches no alert adds nothing.
+  assert.deepEqual(
+    evaluateResults(findings, { today: "2030-03-03" }).map((a) => a.cautions),
+    [[], []],
+  );
+}
+
+// 10. The caution is not part of the fingerprint, so an alert that gains it
+//     (the day rolling over to "today") is not re-sent as new.
+{
+  const findings = [finding(tower, { openAt4: [DATE_A], openAt2: [DATE_A] })];
+  const [plain] = evaluateResults(findings);
+  const [cautioned] = evaluateResults(findings, { today: DATE_A });
+  assert.deepEqual(cautioned.cautions, ["today"]);
+  assert.equal(cautioned.fingerprint, plain.fingerprint);
+  assert.equal(cautioned.fingerprint, `four:${DATE_A}:4443`);
+}
+
+// 11. barcelonaToday follows Madrid wall-clock time, not UTC: correct either
+//     side of local midnight, in summer (CEST, UTC+2) and winter (CET, UTC+1).
+{
+  assert.equal(barcelonaToday(new Date("2026-10-03T22:30:00Z")), "2026-10-04");
+  assert.equal(barcelonaToday(new Date("2026-10-03T21:59:00Z")), "2026-10-03");
+  assert.equal(barcelonaToday(new Date("2026-12-31T23:30:00Z")), "2027-01-01");
+  assert.equal(barcelonaToday(new Date("2026-12-31T22:59:00Z")), "2026-12-31");
+  // Clocks go back on 2026-10-25 (01:00Z): local midnight is 22:00Z before it
+  // and 23:00Z after it.
+  assert.equal(barcelonaToday(new Date("2026-10-24T22:30:00Z")), "2026-10-25");
+  assert.equal(barcelonaToday(new Date("2026-10-25T22:30:00Z")), "2026-10-25");
+  assert.equal(barcelonaToday(new Date("2026-10-25T23:00:00Z")), "2026-10-26");
+  // Clocks go forward on 2026-03-29 (01:00Z): midnight is 23:00Z, then 22:00Z.
+  assert.equal(barcelonaToday(new Date("2026-03-28T23:00:00Z")), "2026-03-29");
+  assert.equal(barcelonaToday(new Date("2026-03-29T21:59:00Z")), "2026-03-29");
+  assert.equal(barcelonaToday(new Date("2026-03-29T22:00:00Z")), "2026-03-30");
+  assert.match(barcelonaToday(), /^\d{4}-\d{2}-\d{2}$/);
+}
+
+// 12. combineAlerts: a cautioned "four" ranks after a clean "small-party", so
+//     the clean one leads the title; with only cautioned alerts the priority
+//     drops to 3 and the title says the slot is likely closed.
+{
+  const findings = [
+    finding(tower, { openAt4: [DATE_A], openAt2: [DATE_A] }),
+    finding(guided, { openAt4: [], openAt2: [DATE_B] }),
+  ];
+  const mixed = combineAlerts(evaluateResults(findings, { today: DATE_A }));
+  assert.ok(mixed.title.startsWith(`Only 2-3 seats per slot - ${DATE_B}`));
+  assert.ok(!mixed.title.startsWith("Likely closed slot"));
+  assert.equal(mixed.priority, 4);
+  assert.ok(mixed.message.indexOf(DATE_B) < mixed.message.indexOf(DATE_A));
+  assert.ok(mixed.message.includes("CAUTION:"));
+
+  const onlyCautioned = combineAlerts(
+    evaluateResults([findings[0]], { today: DATE_A }),
+  );
+  assert.ok(onlyCautioned.title.startsWith("Likely closed slot: "));
+  assert.equal(onlyCautioned.priority, 3);
+
+  const clean = combineAlerts(evaluateResults([findings[0]]));
+  assert.equal(clean.priority, 5);
 }
 
 console.log("All local logic tests passed.");

@@ -195,6 +195,23 @@ function openDates(payload) {
 }
 
 /**
+ * The current date in Barcelona as "YYYY-MM-DD". The calendar's day keys are
+ * venue-local, and the runner's clock is UTC, so the two disagree for a couple
+ * of hours around midnight (and the offset itself shifts with DST).
+ */
+export function barcelonaToday(now = new Date()) {
+  // Assembled from parts instead of trusting a locale's date layout.
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Madrid",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (type) => parts.find((p) => p.type === type).value;
+  return `${get("year")}-${get("month")}-${get("day")}`;
+}
+
+/**
  * Turns per-product probe results into alerts.
  *
  * Each entry of `findings` is:
@@ -205,8 +222,11 @@ function openDates(payload) {
  *             so openAt4 is a genuine 4-together confirmation.
  *  - false -> the backend ignores minTickets for this product, so all we know is
  *             that the day has some availability. Could be a single seat.
+ *
+ * `today` (Barcelona "YYYY-MM-DD") is passed in rather than read from the clock
+ * so this stays pure. An alert for that date gets the "today" caution.
  */
-export function evaluateResults(findings) {
+export function evaluateResults(findings, { today } = {}) {
   const alerts = [];
 
   // Dates come from the findings, not from global configuration: a date with
@@ -249,7 +269,7 @@ export function evaluateResults(findings) {
       kind,
       products,
       statuses,
-      cautions: [],
+      cautions: date === today ? ["today"] : [],
       fingerprint: `${kind}:${date}:${products.map((p) => p.id).sort().join(",")}`,
     });
 
@@ -763,7 +783,7 @@ export async function main() {
     }
 
     const { findings, problems } = result;
-    const alerts = evaluateResults(findings);
+    const alerts = evaluateResults(findings, { today: barcelonaToday() });
 
     if (alerts.length > 0) {
       const summary = alerts
