@@ -88,21 +88,23 @@ const CONFIG = {
  * is filtered centrally: a watched date is printed as its position (D1, D2...),
  * which stays useful for debugging and reveals nothing.
  */
+function dateLabel(date) {
+  let dates;
+  try {
+    dates = CONFIG.dates;
+  } catch {
+    return "D?";
+  }
+  const index = dates.indexOf(date);
+  return index >= 0 ? `D${index + 1}` : "D?";
+}
+
+function redactDates(text) {
+  return text.replace(/\d{4}-\d{2}-\d{2}/g, dateLabel);
+}
+
 function installLogRedaction() {
-  const label = (date) => {
-    let dates;
-    try {
-      dates = CONFIG.dates;
-    } catch {
-      return "D?";
-    }
-    const index = dates.indexOf(date);
-    return index >= 0 ? `D${index + 1}` : "D?";
-  };
-  const redact = (value) =>
-    typeof value === "string"
-      ? value.replace(/\d{4}-\d{2}-\d{2}/g, label)
-      : value;
+  const redact = (value) => (typeof value === "string" ? redactDates(value) : value);
 
   for (const method of ["log", "warn", "error"]) {
     const original = console[method].bind(console);
@@ -578,6 +580,53 @@ async function sendManualTest(topic) {
 }
 
 /**
+ * The GitHub mail path that needs no personal token. A failed run is mailed
+ * only to whoever triggered it, and chained runs are triggered by
+ * github-actions[bot], so without CHAIN_TOKEN the red X reaches no one. An
+ * issue that @mentions the owner does reach them, and goes out the moment it
+ * is opened rather than when the run ends. The repository is public, so the
+ * issue names dates only by their D-label.
+ */
+export function findIssue(alerts, owner) {
+  const label = { four: "4 seats in one slot", unverified: "open, party size unverified", "small-party": "only 2-3 seats per slot" };
+  const sorted = [...alerts].sort((a, b) => isCautioned(a) - isCautioned(b));
+  const lines = sorted.map((a) => {
+    const names = a.products.map((p) => `[${p.name}](${p.url})`).join(", ");
+    const doubt = isCautioned(a) ? " (likely a closed slot)" : "";
+    return `- **${a.date}**: ${label[a.kind]}${doubt} - ${names}`;
+  });
+  return {
+    title: redactDates(`Tickets open: ${sorted[0].date} ${label[sorted[0].kind]} - book now`),
+    body: redactDates(
+      `@${owner} open the booking page now. Openings usually last only 5-30 minutes.\n\n` +
+        `${lines.join("\n")}\n\n` +
+        "D1, D2... are the watched dates in order. The ntfy mail has the real dates.",
+    ),
+  };
+}
+
+async function openIssue({ title, body }) {
+  const token = process.env.GITHUB_TOKEN;
+  const repo = process.env.GITHUB_REPOSITORY;
+  if (!token || !repo) {
+    console.log("Not running in GitHub Actions; no issue opened.");
+    return;
+  }
+  const response = await fetchWithRetry(`https://api.github.com/repos/${repo}/issues`, {
+    method: "POST",
+    headers: {
+      accept: "application/vnd.github+json",
+      authorization: `Bearer ${token}`,
+      "x-github-api-version": "2022-11-28",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ title, body }),
+  });
+  const issue = await response.json();
+  console.log(`Issue opened: #${issue.number}`);
+}
+
+/**
  * Once the trip is over the schedule would otherwise keep firing forever, and
  * every run still bills a full minute even though it does nothing. So the
  * monitor switches itself off rather than quietly burning the account's quota
@@ -787,9 +836,6 @@ async function chainNextRun(inputs = {}) {
     console.log("Monitoring window has ended; not chaining.");
     return;
   }
-  if (!(process.env.CHAIN_TOKEN || "").trim()) {
-    console.warn("CHAIN_TOKEN is not set: a red X on the next run will not be mailed to anyone.");
-  }
   for (const token of tokens) {
     try {
       const response = await fetch(
@@ -831,6 +877,13 @@ export async function main() {
   // test notification every cycle and burn the daily email budget.
   if (manualRun && !chained && process.env.SEND_TEST_ON_MANUAL !== "false") {
     await sendManualTest(topic);
+  }
+  if (process.env.TEST_ISSUE === "true") {
+    const owner = process.env.GITHUB_REPOSITORY_OWNER || "owner";
+    await openIssue({
+      title: "Test: ticket alert mail path",
+      body: `@${owner} if this reached your inbox, ticket finds will too. Close this issue any time.`,
+    });
   }
 
   if (afterMonitoringWindow()) {
@@ -890,6 +943,12 @@ export async function main() {
       if (fresh && alerts.some((a) => !isCautioned(a))) {
         found = true;
         reported.set(key, Math.floor(Date.now() / 60000));
+        try {
+          await openIssue(findIssue(alerts, process.env.GITHUB_REPOSITORY_OWNER || "owner"));
+        } catch (error) {
+          problems.push(`issue: ${error?.message || error}`);
+          console.error(`Could not open the find issue: ${error?.message || error}`);
+        }
         console.log(`::error title=Sagrada tickets available::${summary} - open the booking page now`);
       }
     } else if (sweeps === 1) {

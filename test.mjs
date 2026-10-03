@@ -3,6 +3,7 @@ import {
   barcelonaToday,
   combineAlerts,
   evaluateResults,
+  findIssue,
   formatReported,
   markPersistent,
   parseReported,
@@ -354,6 +355,28 @@ const openOn = (...dates) => evaluateResults([finding(tower, { openAt4: dates, o
   two.find((a) => a.date === DATE_A).cautions.push("persistent");
   assert.ok(combineAlerts(two).title.includes(DATE_B));
   assert.equal(combineAlerts(two).fingerprint, before);
+}
+
+// 18. The find issue is public: it mentions the owner, names dates only by D-label,
+//     and lists clean openings before cautioned ones.
+{
+  process.env.MONITOR_DATES = `${DATE_A},${DATE_B}`;
+  const alerts = evaluateResults(
+    [
+      finding({ ...tower, url: "https://example.test/4443" }, { openAt4: [DATE_A], openAt2: [DATE_A] }),
+      finding({ ...guided, url: "https://example.test/4374" }, { openAt4: [], openAt2: [DATE_B] }),
+    ],
+    { today: DATE_A },
+  );
+  const issue = findIssue(alerts, "someone");
+  const text = issue.title + issue.body;
+  assert.ok(!text.includes(DATE_A) && !text.includes(DATE_B));
+  assert.ok(!/\d{4}-\d{2}-\d{2}/.test(text));
+  assert.ok(issue.body.startsWith("@someone "));
+  assert.ok(issue.title.startsWith("Tickets open: D2 only 2-3 seats"));
+  assert.ok(issue.body.indexOf("**D2**") < issue.body.indexOf("**D1**"));
+  assert.ok(issue.body.includes("(likely a closed slot)"));
+  assert.ok(issue.body.includes("(https://example.test/4443)"));
 }
 
 console.log("All local logic tests passed.");

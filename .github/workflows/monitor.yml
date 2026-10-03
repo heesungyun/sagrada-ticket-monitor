@@ -20,6 +20,10 @@ on:
         description: "Rehearsal only. Shorten the watch so a test run finishes quickly."
         required: false
         default: ""
+      test_issue:
+        description: "Set to true to open a test issue and check that its mail reaches you."
+        required: false
+        default: ""
       reported:
         description: "Set by the monitor: finds already reported, so a successor does not fail on them again. Leave empty."
         required: false
@@ -29,6 +33,8 @@ permissions:
   contents: read
   # Lets a run start its successor, and switch the schedule off after the window.
   actions: write
+  # A find opens an issue mentioning the owner: the GitHub mail that reaches them.
+  issues: write
 
 concurrency:
   group: sagrada-ticket-monitor
@@ -62,6 +68,7 @@ jobs:
           # triggers each run and receives its failure mail. Optional.
           CHAIN_TOKEN: ${{ secrets.CHAIN_TOKEN }}
           REPORTED_ALERTS: ${{ inputs.reported }}
+          TEST_ISSUE: ${{ inputs.test_issue }}
           POLL_MINUTES: ${{ inputs.poll_minutes != '' && inputs.poll_minutes || '50' }}
           POLL_INTERVAL_SECONDS: "300"
           # ntfy free tier allows only 5 emails a day, so repeat mail about a
