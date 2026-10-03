@@ -249,6 +249,7 @@ export function evaluateResults(findings) {
       kind,
       products,
       statuses,
+      cautions: [],
       fingerprint: `${kind}:${date}:${products.map((p) => p.id).sort().join(",")}`,
     });
 
@@ -264,10 +265,31 @@ function bookingUrl(product) {
   return product.url;
 }
 
+/**
+ * Reasons an alert is probably not bookable. The calendar counts free seats in
+ * every time slot, including slots the booking page will not sell (already
+ * started, or closed by the operator), and the page greys those out. Seen
+ * live: past days still read "availability". A cautioned alert is still sent,
+ * but labelled, ranked after clean ones, and never turns the run red alone.
+ * Cautions are deliberately not part of the fingerprint, so gaining one does
+ * not re-send an alert that already went out.
+ */
+const CAUTION_TEXT = {
+  today:
+    "This is today's date. The calendar also counts seats left in slots that have already started, which the booking page will not sell.",
+  persistent:
+    "This has stayed open for a while. Real cancellations usually go within minutes; a long-lived opening is more likely a slot the page has closed.",
+};
+
+function isCautioned(alert) {
+  return (alert.cautions?.length ?? 0) > 0;
+}
+
 function titleFor(alert) {
-  if (alert.kind === "four") return `4 TICKETS CONFIRMED - ${alert.date}`;
-  if (alert.kind === "unverified") return `Opening (size unverified) - ${alert.date}`;
-  return `Only 2-3 seats per slot - ${alert.date}`;
+  const prefix = isCautioned(alert) ? "Likely closed slot: " : "";
+  if (alert.kind === "four") return `${prefix}4 TICKETS CONFIRMED - ${alert.date}`;
+  if (alert.kind === "unverified") return `${prefix}Opening (size unverified) - ${alert.date}`;
+  return `${prefix}Only 2-3 seats per slot - ${alert.date}`;
 }
 
 function messageFor(alert) {
@@ -283,10 +305,14 @@ function messageFor(alert) {
       "The best slot holds only 2-3 people, not 4. A 2+2 split across two slots may be possible - open the page and check a second slot now.",
   }[alert.kind];
   const note = DATE_NOTES[alert.date] ? `\n\n${DATE_NOTES[alert.date]}` : "";
-  return `${explanation}\n\n${alert.date} \uc804\uccb4 \ud604\ud669:\n${names}${note}\n\nref:${alert.fingerprint}`;
+  const caution = (alert.cautions || [])
+    .map((c) => `\n\nCAUTION: ${CAUTION_TEXT[c] || c}`)
+    .join("");
+  return `${explanation}${caution}\n\n${alert.date} \uc804\uccb4 \ud604\ud669:\n${names}${note}\n\nref:${alert.fingerprint}`;
 }
 
 function priorityFor(alert) {
+  if (isCautioned(alert)) return 3;
   if (alert.kind === "four") return 5;
   return 4;
 }
@@ -361,10 +387,13 @@ function alertEmail() {
  * is the best news possible, and the old code turned it into dropped alerts.
  * So a run sends at most one mail, covering every date it found.
  */
-function combineAlerts(alerts) {
+export function combineAlerts(alerts) {
   const rank = { four: 0, unverified: 1, "small-party": 2 };
   const sorted = [...alerts].sort(
-    (a, b) => rank[a.kind] - rank[b.kind] || a.date.localeCompare(b.date),
+    (a, b) =>
+      isCautioned(a) - isCautioned(b) ||
+      rank[a.kind] - rank[b.kind] ||
+      a.date.localeCompare(b.date),
   );
   const best = sorted[0];
   const dates = sorted.map((a) => a.date);
@@ -387,11 +416,12 @@ function combineAlerts(alerts) {
   };
 }
 
+/** Returns false when the alert was a duplicate and nothing was sent. */
 async function sendCombinedAlert(topic, alerts) {
   const combined = combineAlerts(alerts);
   if (await wasRecentlySent(topic, combined.fingerprint)) {
     console.log(`Skipping duplicate notification for ${combined.fingerprint}`);
-    return;
+    return false;
   }
   const email = alertEmail();
   const payload = {
@@ -409,6 +439,7 @@ async function sendCombinedAlert(topic, alerts) {
     await postNtfy(topic, payload);
   }
   console.log(`Notification sent: ${combined.title}${email ? " (+ email)" : ""}`);
+  return true;
 }
 
 async function sendNtfy(topic, alert) {
@@ -735,14 +766,23 @@ export async function main() {
     const alerts = evaluateResults(findings);
 
     if (alerts.length > 0) {
-      found = true;
-      const summary = alerts.map((a) => `${a.date} (${a.kind})`).join(", ");
-      console.log(`::error title=Sagrada tickets available::${summary} - open the booking page now`);
+      const summary = alerts
+        .map((a) => `${a.date} (${a.kind}${isCautioned(a) ? `, ${a.cautions.join("+")}` : ""})`)
+        .join(", ");
+      console.log(`::warning title=Sagrada calendar opening::${summary}`);
+      // The red X is the "go now" mail, so it is spent only on news: a clean
+      // alert that was actually sent, or that failed to send (then the red X is
+      // the only path left). A duplicate was already reported.
+      let fresh = true;
       try {
-        await sendCombinedAlert(topic, alerts);
+        fresh = await sendCombinedAlert(topic, alerts);
       } catch (error) {
         problems.push(`alert: ${error?.message || error}`);
         console.error(`Failed to send alert: ${error?.message || error}`);
+      }
+      if (fresh && alerts.some((a) => !isCautioned(a))) {
+        found = true;
+        console.log(`::error title=Sagrada tickets available::${summary} - open the booking page now`);
       }
     } else if (sweeps === 1) {
       console.log(`Nothing open across ${CONFIG.dates.length} watched dates.`);
