@@ -20,6 +20,10 @@ on:
         description: "Rehearsal only. Shorten the watch so a test run finishes quickly."
         required: false
         default: ""
+      reported:
+        description: "Set by the monitor: finds already reported, so a successor does not fail on them again. Leave empty."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -54,6 +58,10 @@ jobs:
           DATE_NOTES_JSON: ${{ secrets.DATE_NOTES_JSON }}
           CHAINED_RUN: ${{ inputs.chained }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Personal token for chaining, so the owner - not github-actions[bot] -
+          # triggers each run and receives its failure mail. Optional.
+          CHAIN_TOKEN: ${{ secrets.CHAIN_TOKEN }}
+          REPORTED_ALERTS: ${{ inputs.reported }}
           POLL_MINUTES: ${{ inputs.poll_minutes != '' && inputs.poll_minutes || '50' }}
           POLL_INTERVAL_SECONDS: "300"
           # ntfy free tier allows only 5 emails a day, so repeat mail about a

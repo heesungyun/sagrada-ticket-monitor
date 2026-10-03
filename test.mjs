@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { barcelonaToday, combineAlerts, evaluateResults, markPersistent } from "./monitor.mjs";
+import {
+  barcelonaToday,
+  combineAlerts,
+  evaluateResults,
+  formatReported,
+  markPersistent,
+  parseReported,
+  reportKey,
+} from "./monitor.mjs";
 
 const products = [
   { id: 4375, name: "basic" },
@@ -312,6 +320,40 @@ const openOn = (...dates) => evaluateResults([finding(tower, { openAt4: dates, o
   assert.ok(mixed.title.endsWith("(+1 more)"));
   assert.equal(mixed.priority, 4);
   assert.ok(mixed.message.startsWith(`=== ${DATE_B} ===`));
+}
+
+// 17. Reported finds carried to the successor run: they round-trip, expire with
+//     the cooldown, and the key is keyed by the secret so it does not expose the date.
+{
+  const HOUR = 3_600_000;
+  const now = 1_800_000_000_000;
+  const minute = (ms) => Math.floor(ms / 60000);
+  const raw = `aaa@${minute(now - 1 * HOUR)},bbb@${minute(now - 7 * HOUR)},,junk`;
+  const entries = parseReported(raw, now, 6);
+  assert.deepEqual([...entries.keys()], ["aaa"]);
+  assert.deepEqual(parseReported(formatReported(entries), now, 6), entries);
+  assert.equal(parseReported("", now, 6).size, 0);
+  assert.equal(parseReported(undefined, now, 6).size, 0);
+
+  const alerts = evaluateResults([finding(tower, { openAt4: [DATE_A], openAt2: [DATE_A] })]);
+  const key = reportKey("secret_topic_1", alerts);
+  assert.match(key, /^[0-9a-f]{16}$/);
+  assert.equal(reportKey("secret_topic_1", alerts), key);
+  assert.notEqual(reportKey("secret_topic_2", alerts), key);
+  assert.ok(!key.includes(DATE_A));
+  // Gaining a caution must not make an already-reported find look new.
+  markPersistent(alerts, new Map([[DATE_A, 0]]), 60 * 60_000, 15);
+  assert.equal(reportKey("secret_topic_1", alerts), key);
+
+  // Same with several dates, where a caution reorders the combined alert.
+  const two = evaluateResults([
+    finding(tower, { openAt4: [DATE_A], openAt2: [DATE_A] }),
+    finding(guided, { openAt4: [], openAt2: [DATE_B] }),
+  ]);
+  const before = combineAlerts(two).fingerprint;
+  two.find((a) => a.date === DATE_A).cautions.push("persistent");
+  assert.ok(combineAlerts(two).title.includes(DATE_B));
+  assert.equal(combineAlerts(two).fingerprint, before);
 }
 
 console.log("All local logic tests passed.");

@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { pathToFileURL } from "node:url";
 
 // Which dates to watch, and any per-date constraints, come from configuration
@@ -432,7 +433,9 @@ export function combineAlerts(alerts) {
     message: body,
     priority: priorityFor(best),
     click: bookingUrl(best.products[0]),
-    fingerprint: `combined:${sorted.map((a) => a.fingerprint).join("|")}`,
+    // Order-free: ranking moves when an alert gains a caution, and that must
+    // not make the same openings look like news.
+    fingerprint: `combined:${alerts.map((a) => a.fingerprint).sort().join("|")}`,
   };
 }
 
@@ -722,6 +725,36 @@ async function sweep(accessToken) {
 }
 
 /**
+ * Finds that earlier runs in this chain already failed for, so a successor
+ * seeing the same opening does not fail again. ntfy history does the same job,
+ * except when ntfy is what broke - and then every run would end at its first
+ * sweep and mail a red X every couple of minutes. Carried in the dispatch
+ * input, which is public on this repository, so a key is an HMAC under the
+ * secret topic: a plain hash of a date is trivially reversed.
+ * Format: "<key>@<epoch minute>,..."; entries expire with the alert cooldown.
+ */
+export function parseReported(raw, now, hours) {
+  const cutoff = now / 60000 - hours * 60;
+  const entries = new Map();
+  for (const part of (raw || "").split(",")) {
+    const [key, minute] = part.trim().split("@");
+    if (key && Number(minute) >= cutoff) entries.set(key, Number(minute));
+  }
+  return entries;
+}
+
+export function formatReported(entries) {
+  return [...entries].slice(-20).map(([key, minute]) => `${key}@${minute}`).join(",");
+}
+
+export function reportKey(secret, alerts) {
+  return createHmac("sha256", secret)
+    .update(combineAlerts(alerts).fingerprint)
+    .digest("hex")
+    .slice(0, 16);
+}
+
+/**
  * Asks GitHub to start the next run as this one ends.
  *
  * GitHub's scheduler was measured delivering about 8 runs a day against a cron
@@ -734,12 +767,19 @@ async function sweep(accessToken) {
  * one run exists at a time, and the workflow's concurrency group would collapse
  * accidental overlap.
  */
-async function chainNextRun() {
+async function chainNextRun(inputs = {}) {
   if (process.env.CHAIN_RUNS === "false") return;
-  const token = process.env.GITHUB_TOKEN;
   const repo = process.env.GITHUB_REPOSITORY;
   const ref = process.env.GITHUB_REF_NAME || "main";
-  if (!token || !repo) {
+  // GitHub mails a failed run only to whoever triggered it. A run dispatched
+  // with GITHUB_TOKEN is triggered by github-actions[bot], so its red X mails
+  // nobody (the 9/25 find ran as that bot). CHAIN_TOKEN, a personal token, makes
+  // the owner the trigger. GITHUB_TOKEN stays as the fallback so an expired
+  // personal token costs the mail, not the chain.
+  const tokens = [process.env.CHAIN_TOKEN, process.env.GITHUB_TOKEN]
+    .map((t) => (t || "").trim())
+    .filter(Boolean);
+  if (!tokens.length || !repo) {
     console.log("Not running in GitHub Actions; not chaining.");
     return;
   }
@@ -747,24 +787,32 @@ async function chainNextRun() {
     console.log("Monitoring window has ended; not chaining.");
     return;
   }
-  try {
-    const response = await fetch(
-      `https://api.github.com/repos/${repo}/actions/workflows/monitor.yml/dispatches`,
-      {
-        method: "POST",
-        headers: {
-          accept: "application/vnd.github+json",
-          authorization: `Bearer ${token}`,
-          "x-github-api-version": "2022-11-28",
-          "content-type": "application/json",
+  if (!(process.env.CHAIN_TOKEN || "").trim()) {
+    console.warn("CHAIN_TOKEN is not set: a red X on the next run will not be mailed to anyone.");
+  }
+  for (const token of tokens) {
+    try {
+      const response = await fetch(
+        `https://api.github.com/repos/${repo}/actions/workflows/monitor.yml/dispatches`,
+        {
+          method: "POST",
+          headers: {
+            accept: "application/vnd.github+json",
+            authorization: `Bearer ${token}`,
+            "x-github-api-version": "2022-11-28",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ ref, inputs: { chained: "true", ...inputs } }),
         },
-        body: JSON.stringify({ ref, inputs: { chained: "true" } }),
-      },
-    );
-    if (response.status === 204) console.log("Next run dispatched.");
-    else console.warn(`Could not chain next run: ${response.status} ${await response.text()}`);
-  } catch (error) {
-    console.warn(`Could not chain next run: ${error?.message || error}`);
+      );
+      if (response.status === 204) {
+        console.log("Next run dispatched.");
+        return;
+      }
+      console.warn(`Could not chain next run: ${response.status} ${await response.text()}`);
+    } catch (error) {
+      console.warn(`Could not chain next run: ${error?.message || error}`);
+    }
   }
 }
 
@@ -791,7 +839,13 @@ export async function main() {
     return;
   }
 
-  const deadline = Date.now() + POLL_MINUTES * 60 * 1000;
+  const startedAt = Date.now();
+  const reported = parseReported(
+    process.env.REPORTED_ALERTS,
+    startedAt,
+    Number(process.env.ALERT_COOLDOWN_HOURS ?? 2),
+  );
+  const deadline = startedAt + POLL_MINUTES * 60 * 1000;
   let accessToken = await fetchAccessToken();
   let found = false;
   let sweeps = 0;
@@ -831,8 +885,11 @@ export async function main() {
         problems.push(`alert: ${error?.message || error}`);
         console.error(`Failed to send alert: ${error?.message || error}`);
       }
+      const key = reportKey(topic, alerts);
+      if (reported.has(key)) fresh = false;
       if (fresh && alerts.some((a) => !isCautioned(a))) {
         found = true;
+        reported.set(key, Math.floor(Date.now() / 60000));
         console.log(`::error title=Sagrada tickets available::${summary} - open the booking page now`);
       }
     } else if (sweeps === 1) {
@@ -856,16 +913,26 @@ export async function main() {
       process.exitCode = 1;
     }
 
+    // GitHub mails a failure only when the run ends, so a find must end the
+    // run now rather than at the deadline - openings last 5-30 minutes, and
+    // waiting out the watch made the mail arrive up to 50 minutes late. The
+    // successor is chained below and picks the watch straight back up; it sees
+    // the same opening as a duplicate, so it does not fail again.
+    if (found) {
+      console.log("Fresh find: ending the run now so the failure mail goes out.");
+      break;
+    }
+
     const remaining = deadline - Date.now();
     if (remaining <= 0) break;
     await sleep(Math.min(POLL_INTERVAL_SECONDS * 1000, remaining));
   }
 
-  console.log(`Completed ${sweeps} sweeps over ${POLL_MINUTES} minutes.`);
-  await chainNextRun();
+  console.log(`Completed ${sweeps} sweeps in ${((Date.now() - startedAt) / 60000).toFixed(1)} minutes.`);
+  await chainNextRun({ reported: formatReported(reported) });
 
-  // Deliberately fail the run when tickets are found: GitHub mails the account
-  // owner on failure, which needs no ntfy token and no working phone push.
+  // Deliberately fail the run when tickets are found: GitHub mails whoever
+  // triggered the run, which needs no ntfy token and no working phone push.
   if (found) process.exitCode = 1;
 }
 
