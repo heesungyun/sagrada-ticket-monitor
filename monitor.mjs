@@ -168,13 +168,13 @@ async function fetchAccessToken() {
   return payload.access_token;
 }
 
-async function fetchAvailability(accessToken, product, minTickets) {
+async function fetchAvailability(accessToken, product, minTickets, month = 10, year = 2026) {
   // All target dates are October 2026, so a single monthly request covers Oct 3-8.
   const search = new URLSearchParams({
     minTickets: String(minTickets),
-    month: "10",
+    month: String(month),
     venueId: String(product.venueId),
-    year: "2026",
+    year: String(year),
   });
   const url = `https://services.clorian.com/catalog/salesGroups/${CONFIG.salesGroupId}/product/${product.id}/availability?${search}`;
   const response = await fetchWithRetry(url, {
@@ -585,9 +585,18 @@ async function probeProduct(accessToken, product) {
   const base = await fetchAvailability(accessToken, product, 1);
   await sleep(150);
   if (Object.keys(base).length === 0) {
+    // 4779 drops days with nothing left, so a sold-out month is also {}. Seen
+    // live once its last October day went. The next month tells the two apart:
+    // a wrong venue is empty there too.
+    const next = await fetchAvailability(accessToken, product, 1, 11, 2026);
+    await sleep(150);
+    if (Object.keys(next).length > 0) {
+      console.log(`[${product.id}] nothing left this month (venue verified via next month).`);
+      return { product, enforcesMinTickets: true, openAt4: [], openAt2: [] };
+    }
     throw new Error(
       `${product.name} (${product.id}) returned an empty calendar at minTickets=1 for ` +
-        `venueId=${product.venueId}. Either the venue mapping changed or the whole month is gone. ` +
+        `venueId=${product.venueId}, and the next month is empty too, so the venue mapping has likely changed. ` +
         `This ticket type is NOT being monitored.`,
     );
   }
