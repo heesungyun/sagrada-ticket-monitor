@@ -652,6 +652,34 @@ async function probeProduct(accessToken, product) {
 
 const POLL_MINUTES = Number(process.env.POLL_MINUTES ?? 50);
 const POLL_INTERVAL_SECONDS = Number(process.env.POLL_INTERVAL_SECONDS ?? 90);
+// Real cancellation releases get bought within minutes, so an opening that is
+// still there after this long is more likely a slot the page has closed.
+const PERSISTENT_MINUTES = Number(process.env.PERSISTENT_MINUTES ?? 15);
+
+/**
+ * Adds the "persistent" caution to openings that have stayed open since
+ * `minutes` ago or longer.
+ *
+ * `firstSeen` maps a date to the time (ms) its opening was first seen in this
+ * run, and is updated in place. It is keyed by date rather than by fingerprint
+ * so an opening that changes shape (2-3 seats becoming 4) is still the same
+ * opening and keeps its clock. A date with no alert this sweep is dropped: the
+ * opening really closed, and if it comes back that is a fresh release.
+ */
+export function markPersistent(alerts, firstSeen, now, minutes) {
+  const open = new Set(alerts.map((alert) => alert.date));
+  for (const date of firstSeen.keys()) {
+    if (!open.has(date)) firstSeen.delete(date);
+  }
+  for (const alert of alerts) {
+    if (!firstSeen.has(alert.date)) firstSeen.set(alert.date, now);
+    const persistent = now - firstSeen.get(alert.date) >= minutes * 60_000;
+    if (persistent && !alert.cautions.includes("persistent")) {
+      alert.cautions.push("persistent");
+    }
+  }
+  return alerts;
+}
 
 /**
  * One sweep of all four ticket types. Returns what it found so the caller can
@@ -747,6 +775,7 @@ export async function main() {
   let accessToken = await fetchAccessToken();
   let found = false;
   let sweeps = 0;
+  const openSince = new Map();
 
   // Keep watching for the whole run rather than sampling once and exiting.
   // Wall-clock coverage is what decides whether a short opening is seen at all.
@@ -764,6 +793,8 @@ export async function main() {
 
     const { findings, problems } = result;
     const alerts = evaluateResults(findings);
+    // Runs on empty sweeps too: that is how a closed opening is forgotten.
+    markPersistent(alerts, openSince, Date.now(), PERSISTENT_MINUTES);
 
     if (alerts.length > 0) {
       const summary = alerts
